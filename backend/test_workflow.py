@@ -25,30 +25,39 @@ payload = {
 
 def run_tests():
     with TestClient(app) as client:
-        print("Testing /predict endpoint...")
+        print("Testing /predict endpoint (all properties)...")
         response = client.post("/predict", json=payload)
         if response.status_code == 200:
             print("SUCCESS /predict:")
-            print(json.dumps(response.json(), indent=2))
+            for p in response.json().get("predictions", []):
+                print(f"  {p['label']}: {p['prediction']} {p['unit']}")
         else:
             print("FAILED /predict:")
             print(response.text)
 
-        print("\nTesting /explain endpoint...")
-        response = client.post("/explain", json=payload)
+        for target in ("yield_strength", "tensile_strength", "elongation"):
+            print(f"\nTesting /explain endpoint (target={target})...")
+            response = client.post("/explain", json={"features": payload, "target": target})
+            if response.status_code == 200:
+                data = response.json()
+                print(f"SUCCESS /explain: {data.get('label')} | base={data.get('base_value')} "
+                      f"| prediction={data.get('prediction')} {data.get('unit')} "
+                      f"| features={len(data.get('features', []))}")
+            else:
+                print("FAILED /explain:", response.text)
+
+        print("\nTesting /dependence endpoint (feature=ni, target=tensile_strength)...")
+        response = client.post(
+            "/dependence",
+            json={"features": payload, "feature": "ni", "target": "tensile_strength", "points": 5},
+        )
         if response.status_code == 200:
-            print("SUCCESS /explain:")
             data = response.json()
-            print(f"Base Value: {data.get('base_value')}")
-            features = data.get('features', [])
-            print(f"Number of features returned: {len(features)}")
-            if features:
-                print("First feature sample:", json.dumps(features[0], indent=2))
-                
-            # The dependence data is computed on the frontend, so it's not expected here.
+            print(f"SUCCESS /dependence: {data.get('label')} | feature={data.get('feature')} "
+                  f"| current={data.get('current_value')} | points={len(data.get('points', []))}")
+            print("Points:", json.dumps(data.get("points", []), indent=2))
         else:
-            print("FAILED /explain:")
-            print(response.text)
+            print("FAILED /dependence:", response.text)
 
 if __name__ == "__main__":
     run_tests()

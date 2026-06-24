@@ -27,58 +27,49 @@ export function toImportanceRows(explanation) {
     .sort((a, b) => b.importance - a.importance);
 }
 
-export function toWaterfallRows(explanation) {
-  if (!explanation?.features?.length) return [];
+// Build a readable SHAP waterfall: features are sorted by absolute impact (largest
+// drivers first) and the long tail of tiny contributions is aggregated into a single
+// "Other" row. The base value (E[f(x)]) and the final prediction are returned as
+// reference markers rather than full-height bars so the small increments stay visible.
+export function toWaterfallRows(explanation, topN = 8) {
+  if (!explanation?.features?.length) return null;
 
-  let running = Number(explanation.base_value);
-  const base = {
-    name: "Base value",
-    start: 0,
-    end: running,
-    delta: running,
-    type: "base",
-  };
+  const base = Number(explanation.base_value);
+  const final = Number(explanation.prediction);
 
-  const features = explanation.features.map((feature) => {
-    const delta = Number(feature.shap_value);
+  const sorted = explanation.features
+    .map((feature) => ({ name: formatFeatureName(feature.name), delta: Number(feature.shap_value) }))
+    .sort((a, b) => Math.abs(b.delta) - Math.abs(a.delta));
+
+  const head = sorted.slice(0, topN);
+  const tail = sorted.slice(topN);
+  if (tail.length) {
+    const tailDelta = tail.reduce((sum, f) => sum + f.delta, 0);
+    head.push({ name: `Other (${tail.length})`, delta: tailDelta });
+  }
+
+  let running = base;
+  const rows = head.map((f) => {
     const start = running;
-    running += delta;
+    running += f.delta;
     return {
-      name: formatFeatureName(feature.name),
+      name: f.name,
       start,
       end: running,
-      delta,
-      type: delta >= 0 ? "positive" : "negative",
+      delta: f.delta,
+      type: f.delta >= 0 ? "positive" : "negative",
     };
   });
 
-  return [
-    base,
-    ...features,
-    {
-      name: "Final prediction",
-      start: 0,
-      end: Number(explanation.prediction),
-      delta: Number(explanation.prediction),
-      type: "final",
-    },
-  ];
-}
+  const allValues = [base, final, ...rows.flatMap((r) => [r.start, r.end])];
+  const min = Math.min(...allValues);
+  const max = Math.max(...allValues);
+  const pad = (max - min || Math.abs(max) || 1) * 0.08;
 
-export function toDependenceRows(selectedFeature, formValues, explanation) {
-  const selected = explanation?.features?.find((feature) => feature.name === selectedFeature);
-  if (!selected) return [];
-
-  const center = Number(formValues[selectedFeature]);
-  const shapValue = Number(selected.shap_value);
-  const span = center === 0 ? 1 : Math.abs(center) * 0.35;
-
-  return [-2, -1, 0, 1, 2].map((step) => {
-    const featureValue = Math.max(0, center + step * span * 0.5);
-    const scale = center === 0 ? step * 0.25 : (featureValue - center) / Math.max(Math.abs(center), 1);
-    return {
-      featureValue: Number(featureValue.toFixed(4)),
-      shapValue: Number((shapValue * (1 + scale)).toFixed(4)),
-    };
-  });
+  return {
+    rows,
+    base: Number(base.toFixed(4)),
+    final: Number(final.toFixed(4)),
+    domain: [Number((min - pad).toFixed(2)), Number((max + pad).toFixed(2))],
+  };
 }

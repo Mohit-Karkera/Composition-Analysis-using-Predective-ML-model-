@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
@@ -10,11 +11,18 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from .services.prediction import ModelLoadError, PredictionService
 from .services.shap_explainer import ShapExplainerService
-from .utils.preprocessing import FEATURE_COLUMNS, InputValidationError, TARGET_COLUMN
+from .utils.preprocessing import (
+    DEFAULT_TARGET,
+    FEATURE_COLUMNS,
+    InputValidationError,
+    TARGETS,
+)
 
+
+from .train_model import DATASET_PATH, MODEL_PATH
 
 BASE_DIR = Path(__file__).resolve().parent
-MODEL_PATH = BASE_DIR / "model" / "model.pkl"
+PROJECT_DIR = BASE_DIR.parent
 
 
 class MaterialFeatures(BaseModel):
@@ -33,6 +41,18 @@ class MaterialFeatures(BaseModel):
         return data
 
 
+class ExplainRequest(BaseModel):
+    features: dict[str, Any] = Field(..., description="Material feature values.")
+    target: str = Field(default=DEFAULT_TARGET, description="Property to explain.")
+
+
+class DependenceRequest(BaseModel):
+    features: dict[str, Any] = Field(..., description="Material feature values.")
+    feature: str = Field(..., description="Feature to sweep for the sensitivity curve.")
+    target: str = Field(default=DEFAULT_TARGET, description="Property to analyse.")
+    points: int = Field(default=25, ge=2, le=200, description="Number of sweep points.")
+
+
 prediction_service: PredictionService | None = None
 shap_service: ShapExplainerService | None = None
 startup_error: str | None = None
@@ -45,14 +65,46 @@ async def lifespan(_: FastAPI):
 
 
 def load_model_once() -> None:
-    """Load the sklearn model once so each request only performs inference."""
+    """Load the sklearn model once so each request only performs inference.
+
+    Self-heals: if the model artifact is missing or was trained with a different
+    scikit-learn version than the one installed (which would otherwise produce
+    InconsistentVersionWarning / invalid predictions), it is retrained from the
+    bundled dataset before serving. This keeps the app working out-of-the-box on a
+    fresh machine without any manual training step.
+    """
     global prediction_service, shap_service, startup_error
 
     try:
-        prediction_service = PredictionService(MODEL_PATH)
-        shap_service = ShapExplainerService(prediction_service.model)
+        import sklearn
+
+        from .train_model import (
+            MODEL_FORMAT,
+            model_format,
+            model_sklearn_version,
+            train_model_if_missing,
+        )
+
+        train_model_if_missing()
+
+        # Retrain when the saved artifact is stale: different sklearn version
+        # (avoids InconsistentVersionWarning / invalid predictions) or an older
+        # model structure (e.g. single-target -> multi-target).
+        version_stale = model_sklearn_version() != sklearn.__version__
+        format_stale = model_format() != MODEL_FORMAT
+        if version_stale or format_stale:
+            reason = "version mismatch" if version_stale else "outdated model format"
+            print(f"Retraining model ({reason})...")
+            train_model_if_missing(force=True)
+
+        prediction_service = PredictionService(MODEL_PATH, DATASET_PATH)
+        if not prediction_service.has_all_targets():
+            train_model_if_missing(force=True)
+            prediction_service = PredictionService(MODEL_PATH, DATASET_PATH)
+
+        shap_service = ShapExplainerService(prediction_service.models)
         startup_error = None
-    except ModelLoadError as exc:
+    except Exception as exc:
         startup_error = str(exc)
 
 
@@ -63,15 +115,27 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+# Allowed browser origins. Local dev ports are always allowed; deployment adds the
+# hosted frontend via the ALLOWED_ORIGINS env var (comma-separated, or "*" for any).
+_DEV_ORIGINS = [
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+    "http://localhost:5174",
+    "http://127.0.0.1:5174",
+]
+_extra_origins = [o.strip() for o in os.getenv("ALLOWED_ORIGINS", "").split(",") if o.strip()]
+_allow_origins = _DEV_ORIGINS + _extra_origins
+_allow_credentials = True
+if "*" in _extra_origins:
+    # Browsers reject wildcard origin together with credentials; the API is stateless
+    # (no cookies), so disabling credentials is safe.
+    _allow_origins = ["*"]
+    _allow_credentials = False
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:5173",
-        "http://127.0.0.1:5173",
-        "http://localhost:5174",
-        "http://127.0.0.1:5174",
-    ],
-    allow_credentials=True,
+    allow_origins=_allow_origins,
+    allow_credentials=_allow_credentials,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -79,9 +143,20 @@ app.add_middleware(
 
 @app.get("/health")
 def health() -> dict[str, Any]:
+    from .train_model import model_metrics
+
+    metrics = model_metrics()
     return {
         "status": "ok" if prediction_service and shap_service else "model_unavailable",
-        "target": TARGET_COLUMN,
+        "targets": [
+            {
+                "key": t["key"],
+                "label": t["label"],
+                "unit": t["unit"],
+                "metrics": metrics.get(t["key"]),
+            }
+            for t in TARGETS
+        ],
         "required_features": FEATURE_COLUMNS,
         "model_path": str(MODEL_PATH),
         "error": startup_error,
@@ -89,7 +164,7 @@ def health() -> dict[str, Any]:
 
 
 @app.post("/predict")
-def predict(request: MaterialFeatures) -> dict[str, float | str]:
+def predict(request: MaterialFeatures) -> dict[str, Any]:
     service = _prediction_service()
     try:
         return service.predict(request.as_feature_payload())
@@ -100,14 +175,25 @@ def predict(request: MaterialFeatures) -> dict[str, float | str]:
 
 
 @app.post("/explain")
-def explain(request: MaterialFeatures) -> dict[str, Any]:
+def explain(request: ExplainRequest) -> dict[str, Any]:
     service = _shap_service()
     try:
-        return service.explain(request.as_feature_payload())
+        return service.explain(request.features, request.target)
     except InputValidationError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"SHAP explanation failed: {exc}") from exc
+
+
+@app.post("/dependence")
+def dependence(request: DependenceRequest) -> dict[str, Any]:
+    service = _prediction_service()
+    try:
+        return service.sensitivity(request.features, request.feature, request.target, request.points)
+    except InputValidationError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Sensitivity analysis failed: {exc}") from exc
 
 
 def _prediction_service() -> PredictionService:

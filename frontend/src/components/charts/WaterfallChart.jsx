@@ -1,36 +1,65 @@
-import { Bar, BarChart, CartesianGrid, Cell, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
+import {
+  Bar,
+  BarChart,
+  Cell,
+  LabelList,
+  ReferenceLine,
+  ResponsiveContainer,
+  Tooltip,
+  XAxis,
+  YAxis,
+} from "recharts";
 
 const colors = {
-  base: "#8b5cf6", // violet-500
-  positive: "#06b6d4", // cyan-500
-  negative: "#ef4444", // red-500
-  final: "#f1f5f9", // slate-100
+  positive: "#4f46e5", // indigo-600 — pushes the property up
+  negative: "#e11d48", // rose-600   — pushes the property down
 };
 
-export default function WaterfallChart({ data }) {
-  const rows = data.map((row) => ({
+export default function WaterfallChart({ data, unit = "MPa" }) {
+  if (!data?.rows?.length) {
+    return <div className="h-96 grid place-items-center text-sm text-slate-400">No data yet.</div>;
+  }
+
+  const { rows, base, final, domain } = data;
+  const chartRows = rows.map((row) => ({
     ...row,
     range: [Math.min(row.start, row.end), Math.max(row.start, row.end)],
   }));
 
+  const fmt = (v) => Number(v).toLocaleString(undefined, { maximumFractionDigits: unit === "%" ? 2 : 0 });
+  const fmtDelta = (v) => `${v >= 0 ? "+" : ""}${Number(v).toLocaleString(undefined, { maximumFractionDigits: unit === "%" ? 2 : 1 })}`;
+  const height = Math.max(320, chartRows.length * 38 + 60);
+
   return (
-    <div className="h-96 w-full mt-4">
+    <div className="w-full mt-4" style={{ height }}>
       <ResponsiveContainer>
-        <BarChart data={rows} margin={{ left: 12, right: 24, bottom: 70 }}>
-          <CartesianGrid strokeDasharray="3 3" stroke="#1f1f2e" vertical={false} />
-          <XAxis dataKey="name" angle={-35} textAnchor="end" interval={0} height={92} stroke="#64748b" tick={{fill: '#94a3b8'}} />
-          <YAxis stroke="#64748b" tick={{fill: '#94a3b8'}} />
-          <Tooltip
-            formatter={(_, __, item) => [
-              Number(item.payload.delta).toLocaleString(undefined, { maximumFractionDigits: 3 }),
-              "Contribution",
-            ]}
-            contentStyle={{ backgroundColor: '#12121a', borderColor: '#1f1f2e', color: '#f1f5f9', borderRadius: '8px' }}
+        <BarChart data={chartRows} layout="vertical" margin={{ left: 8, right: 56, top: 8, bottom: 28 }}>
+          <XAxis
+            type="number"
+            domain={domain}
+            tickFormatter={fmt}
+            stroke="#cbd5e1"
+            tick={{ fill: "#64748b", fontSize: 11 }}
           />
-          <Bar dataKey="range" radius={[4, 4, 0, 0]}>
-            {rows.map((row) => (
+          <YAxis
+            type="category"
+            dataKey="name"
+            width={104}
+            stroke="#cbd5e1"
+            tick={{ fill: "#334155", fontSize: 12 }}
+          />
+          <Tooltip
+            cursor={{ fill: "rgba(79,70,229,0.05)" }}
+            formatter={(_, __, item) => [`${fmtDelta(item.payload.delta)} ${unit}`, "Contribution"]}
+            contentStyle={{ backgroundColor: "#ffffff", borderColor: "#e2e8f0", color: "#1e293b", borderRadius: "10px", boxShadow: "0 8px 24px -12px rgba(15,23,42,0.25)" }}
+          />
+          <ReferenceLine x={base} stroke="#94a3b8" strokeDasharray="4 4" label={{ value: `base ${fmt(base)}`, position: "top", fill: "#64748b", fontSize: 11 }} />
+          <ReferenceLine x={final} stroke="#7c3aed" strokeWidth={1.5} label={{ value: `predicted ${fmt(final)}`, position: "top", fill: "#7c3aed", fontSize: 11 }} />
+          <Bar dataKey="range" radius={4} barSize={20}>
+            {chartRows.map((row) => (
               <Cell key={row.name} fill={colors[row.type]} />
             ))}
+            <LabelList dataKey="delta" position="right" formatter={fmtDelta} style={{ fill: "#475569", fontSize: 11, fontWeight: 600 }} />
           </Bar>
         </BarChart>
       </ResponsiveContainer>

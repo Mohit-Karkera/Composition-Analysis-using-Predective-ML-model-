@@ -15,15 +15,15 @@ export const compositionFields = [
   { name: "ti", label: "Titanium", symbol: "Ti", defaultValue: 1.55 },
 ];
 
-export const processingFields = [
-  { name: "temperature", label: "Temperature", unit: "C", defaultValue: 500 },
-  { name: "density", label: "Density", unit: "g/cm3", defaultValue: 7.8 },
-  { name: "cooling_rate", label: "Cooling Rate", unit: "C/s", defaultValue: 12 },
-  { name: "holding_time", label: "Holding Time", unit: "min", defaultValue: 45 },
+// Mechanical properties the model predicts (must match backend TARGETS keys).
+export const targets = [
+  { key: "yield_strength", label: "Yield Strength", unit: "MPa" },
+  { key: "tensile_strength", label: "Tensile Strength", unit: "MPa" },
+  { key: "elongation", label: "Elongation", unit: "%" },
 ];
 
 export function initialFormState() {
-  return [...compositionFields, ...processingFields].reduce((state, field) => {
+  return compositionFields.reduce((state, field) => {
     state[field.name] = String(field.defaultValue);
     return state;
   }, {});
@@ -34,4 +34,26 @@ export function modelPayloadFromForm(values) {
     payload[field.name] = Number(values[field.name]);
     return payload;
   }, {});
+}
+
+// Update one composition field and auto-balance Iron (Fe) so the alloy totals 100%.
+// Shared by the Dashboard and Compare pages.
+export function applyCompositionChange(current, name, value) {
+  const next = { ...current, [name]: value };
+  const isComposition = compositionFields.some((f) => f.name === name) && name !== "Fe";
+  if (!isComposition) return next;
+
+  const totalOthers =
+    compositionFields
+      .filter((f) => f.name !== "Fe" && f.name !== name)
+      .reduce((sum, f) => sum + (Number(current[f.name]) || 0), 0) + (Number(value) || 0);
+
+  if (totalOthers > 100) {
+    const capped = 100 - (totalOthers - (Number(value) || 0));
+    next[name] = String(Math.max(0, Number(capped.toFixed(2))));
+    next.Fe = "0.00";
+  } else {
+    next.Fe = String((100 - totalOthers).toFixed(2));
+  }
+  return next;
 }
